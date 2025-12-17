@@ -1,0 +1,230 @@
+#!/usr/bin/env python3
+
+import os
+import enum
+import socket
+import re as regex
+import sys
+from urllib.parse import urlparse
+
+class FTPCommand(enum.Enum):
+    ls = 'ls'
+    mkdir = 'mkdir'
+    rm = 'rm'
+    rmdir = 'rmdir'
+    cp = 'cp'
+    mv = 'mv'
+
+# 
+class FTPAddress:
+    def __init__(self, url):
+        self.scheme, self.username, self.password, self.host, self.port, self.path = self.parse_url(url)
+
+    # initializes an instance by parsing the given URL
+    @staticmethod
+    def parse_url(url):
+        parsed = urlparse(url)
+        scheme = parsed.scheme
+        username = parsed.username or 'anonymous'
+        password = parsed.password or ''
+        host = parsed.hostname
+        port = parsed.port or 21
+        path = parsed.path
+        return scheme, username, password, host, port, path
+
+# initializes an instance of the FTPClient class
+class FTPClient:
+    def __init__(self, address: FTPAddress):
+        self.address = address
+        self.control_socket = self.connect()
+
+    # establish TCP connection to FTP server
+    def connect(self):
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sock.connect((self.address.host, self.address.port))
+        self.handle_response(sock)
+        return sock
+
+    # login into server with username and password
+    def login(self):
+        self.send_command(f"USER {self.address.username}")
+        self.send_command(f"PASS {self.address.password}")
+
+    # send FTP command to server through control socket
+    def send_command(self, command):
+        print(f"Command: {command}")
+        self.control_socket.send(f"{command}\r\n".encode())
+        response = self.handle_response(self.control_socket)
+        return response
+
+    # receive the response from server
+    def receive_response(self):
+        response = ""
+        while True:
+            part = self.control_socket.recv(4096).decode('utf-8')
+            response += part
+            if "\r\n" in part:  # Assuming the end of a message is marked by a newline
+                break
+        print(f"Received response: {response.strip()}")
+        return response
+
+    # handle response from server
+    def handle_response(self, sock):
+        response = sock.recv(4096).decode('utf-8')
+        print(f"Response: {response}")
+        return response
+
+    def mkdir(self, directory):
+        self.send_command(f"MKD {directory}")
+
+    def rm(self, filepath):
+        self.send_command(f"DELE {filepath}")
+
+    def rmdir(self, directory):
+        self.send_command(f"RMD {directory}")
+
+    def ls(self, path=""):
+        ip_address, port = self.enter_pasv_mode()
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as data_sock:
+            data_sock.connect((ip_address, port))
+            # send the LIST command after establishing the data connection
+            self.send_command(f"LIST {path}")
+            # receive and print out directory listing from data connection
+            while True:
+                data = data_sock.recv(4096)
+                if not data:
+                    break
+                print(data.decode('utf-8'))
+        # onfirm completion of LIST command
+        self.handle_response(self.control_socket)
+
+    # initiates passive mode for data transfer with the FTP server
+    def enter_pasv_mode(self):
+        response = self.send_command("PASV")
+        if response is None:
+            print("Failed to get a response from the server.")
+            sys.exit(1)
+
+        # check if the response contains the expected "Entering Passive Mode" message.
+        if "Entering Passive Mode" in response:
+            # extract the IP address and port using regex.
+            match = regex.search(r'\((\d+,\d+,\d+,\d+),(\d+),(\d+)\)', response)
+            if match:
+                ip_address = match.group(1).replace(',', '.')
+                port = (int(match.group(2)) << 8) + int(match.group(3))
+                return ip_address, port
+            else:
+                print("Could not parse PASV response.")
+                sys.exit(1)
+        else:
+            print("PASV command did not return expected response.")
+            sys.exit(1)
+
+    # upload file from local system to FTP Server
+    def upload_file(self, local_path, remote_path):
+        # entering passive mode
+        ip_address, port = self.enter_pasv_mode()
+        with socket.create_connection((ip_address, port)) as data_socket:
+            # initiating file transfer
+            self.send_command(f"STOR {remote_path.lstrip('/')}")  # Ensure remote_path is correctly formatted
+        
+            # opening the local file and sending content
+            with open(local_path, 'rb') as file:
+                while True:
+                    data = file.read(4096)
+                    if not data:
+                        break  # EOF
+                    data_socket.sendall(data)
+    
+        # server will send final response to the control connection
+        final_response = self.receive_response()
+        print(f"Final response: {final_response}")
+
+    # downloads file from FTP server to local system
+    def download_file(self, remote_path, local_path):
+        # Enter PASV mode and create data connection
+        ip_address, port = self.enter_pasv_mode()
+        with socket.create_connection((ip_address, port)) as data_sock:
+            # Send the RETR command to request the file
+            self.send_command(f"RETR {remote_path}")
+            # Open the local file for writing
+            with open(local_path, 'wb') as local_file:
+                while True:
+                    data = data_sock.recv(4096)
+                    if not data:
+                        break  # End of data
+                    local_file.write(data)
+            # Confirm the transfer is complete
+            self.receive_response()
+
+    def mv(self, src_path, dest_path):
+        # This example assumes moving a file on the server by renaming it.
+        self.send_command(f"RNFR {src_path}")
+        self.send_command(f"RNTO {dest_path}")
+
+
+    def close(self):
+        self.send_command("QUIT")
+        self.control_socket.close()
+
+# parses the command line arguments provided to FTP client
+def parse_arguments(args):
+    if len(args) < 3:
+        print("Usage: ./3700ftp [operation] [param1] [param2]")
+        sys.exit(1)
+    operation = FTPCommand(args[1].lower())
+    params = args[2:]
+    return operation, params
+
+
+def main():
+    try:
+        # parse command line arguments to get operation and parameters
+        operation, params = parse_arguments(sys.argv)
+        
+        # check if operation is one of the supported FTP commands
+        if operation in [FTPCommand.ls, FTPCommand.mkdir, FTPCommand.rm, FTPCommand.rmdir, FTPCommand.cp, FTPCommand.mv]:
+            # determine FTP URL based on operation and parameters
+            ftp_url = params[0] if operation != FTPCommand.cp else (params[1] if "ftp://" in params[1] else params[0])
+            ftp_address = FTPAddress(ftp_url)
+            client = FTPClient(ftp_address)
+            client.login()
+
+            if operation == FTPCommand.ls:
+                directory = ftp_address.path if len(params) >= 1 else ""
+                client.ls(directory)
+
+            elif operation == FTPCommand.mkdir:
+                client.mkdir(ftp_address.path)
+
+            elif operation == FTPCommand.rm:
+                client.rm(ftp_address.path)
+
+            elif operation == FTPCommand.rmdir:
+                client.rmdir(ftp_address.path)
+
+            elif operation == FTPCommand.cp:
+		# copy a file, either from FTP to local or local to FTP
+                if "ftp://" in params[0] and len(params) == 2:
+                    # Download from FTP to local
+                    client.download_file(ftp_address.path, params[1])
+                elif "ftp://" in params[1] and len(params) == 2:
+                    # Upload from local to FTP
+                    client.upload_file(params[0], FTPAddress(params[1]).path)
+
+            elif operation == FTPCommand.mv:
+                if len(params) != 2 or "ftp://" not in params[0] or "ftp://" not in params[1]:
+                    raise ValueError("Usage for mv: ./3700ftp mv [ftp_source_path] [ftp_destination_path]")
+                src_address = FTPAddress(params[0])
+                dest_address = FTPAddress(params[1])
+                client.mv(src_address.path, dest_address.path)
+
+            client.close()
+        else:
+            print(f"Unsupported operation: {operation.value}")
+
+    except Exception as e:
+        print(f"An error occurred: {e}")
+
+if __name__ == "__main__":
+    main()
