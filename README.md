@@ -1,6 +1,7 @@
 # FTP Client
 
 Contributors: Andrew Hoang
+Date: February 5, 2024
 
 #High Level Approach
 - The project aimed to develop a command-line FTP client that supports basic file and directory operations on an FTP Server. The implementation focused on using Python's built-in 'socket' library to manually handle the FTP protocol's command and response structure. The client supports operations such as listing directories (ls), creating directories (mkdir), removing files (rm), removing directories (rmdir), copying files to and from the server (cp), and moving files (mv). I followed the suggested implementation approach. This included command line parsing to parse the incoming data. Then adding support and logging-in to FTP server. Next, implement support for making and deleting remote directories. After that, implement support for creating a data channel, and list command to test it. Finally add support for file upload, download and deletion.
